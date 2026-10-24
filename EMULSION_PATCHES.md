@@ -45,3 +45,32 @@ changes this list.
    sensor's masked border as black bars (~120 px on each long edge, 92 px on one short edge).
    Its colour already came from the same frame size (`100-20-Coated6`, the X2D's matrix).
    Verified on an X2D II 3FR: 11904 x 8842 -> 11664 x 8750, Adobe's crop for this frame.
+
+## Where the source is published, and upgrading LibRaw
+
+CDDL asks us to tell users where this modified LibRaw can be downloaded; the app's open-source
+licences page points to https://github.com/dovlet-annayev/emulsion-cam-libraw
+(`emulsion.librawSourceUrl` in `gradle.properties`). That repository keeps the official release
+and our changes apart: its first commit is `LibRaw-0.22.2.tar.gz` unchanged, the next one is the
+list above. Every release that ships a changed LibRaw must have its source there first, and a
+tag per app release (`app-<versionName>`) — never deleted, since older installs still point at
+the repository.
+
+Nothing forces an upgrade. Reasons to take one: new cameras (a body newer than LibRaw's tables
+may develop wrongly — patch 5), fixes for malformed files (every RAW a user imports is untrusted
+input), and LibRaw's own bug fixes. To upgrade:
+
+1. In a clone of the repository, branch from the official-release commit and replace every file
+   with the new release's tarball, committed alone ("LibRaw X.Y.Z, the official release,
+   unchanged").
+2. Re-apply our commits on it (`git cherry-pick` of the changes commit, or a rebase onto it).
+   Conflicts can only be in the patched files. Drop a patch LibRaw has made unnecessary, and
+   update this list.
+3. Copy `src/` (without the three `*_ph.cpp` placeholders), `libraw/`, `internal/`, `COPYRIGHT`
+   and the licences into this folder; keep this file and the "Modified by Emulsion Cam" lines.
+4. Check: the host harness (bit-identical across thread counts, speed), `RawDevelopOnDeviceTest`
+   and `AutoSolveOnDeviceTest`, the unit tests (`LibRawPatchNoticesTest`), and a RAW from each
+   camera a patch targets.
+5. Push the branch as the repository's new `main`, keeping the old one as a branch
+   (`libraw-0.22.2`), then tag at release.
+
