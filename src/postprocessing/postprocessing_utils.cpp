@@ -1,5 +1,6 @@
 /* -*- C++ -*-
  * Copyright 2019-2025 LibRaw LLC (info@libraw.org)
+ * Modified by Emulsion Cam, 2026: convert_to_rgb_loop runs its rows in parallel (EMULSION_PATCHES.md, item 2).
  *
  LibRaw is free software; you can redistribute it and/or modify
  it under the terms of the one of two licenses as you choose:
@@ -98,22 +99,41 @@ void LibRaw::convert_to_rgb_loop(float out_cam[3][4])
   }
   else if (imgdata.idata.colors == 3)
   {
-    for (img = imgdata.image[0], row = 0; row < S.height; row++)
+    // Rows in parallel; the histogram (only read by auto-bright / gamma output) per thread, merged.
+    const int H = S.height, Wd = S.width;
+    int (*hist)[LIBRAW_HISTOGRAM_SIZE] = libraw_internal_data.output_data.histogram;
+#if defined(LIBRAW_USE_OPENMP)
+#pragma omp parallel
+#endif
     {
-      for (col = 0; col < S.width; col++, img += 4)
+      std::vector<int> local(3 * LIBRAW_HISTOGRAM_SIZE, 0);
+#if defined(LIBRAW_USE_OPENMP)
+#pragma omp for schedule(static)
+#endif
+      for (int r = 0; r < H; r++)
       {
-        out[0] = out_cam[0][0] * img[0] + out_cam[0][1] * img[1] +
-                 out_cam[0][2] * img[2];
-        out[1] = out_cam[1][0] * img[0] + out_cam[1][1] * img[1] +
-                 out_cam[1][2] * img[2];
-        out[2] = out_cam[2][0] * img[0] + out_cam[2][1] * img[1] +
-                 out_cam[2][2] * img[2];
-        img[0] = CLIP((int)out[0]);
-        img[1] = CLIP((int)out[1]);
-        img[2] = CLIP((int)out[2]);
-        libraw_internal_data.output_data.histogram[0][img[0] >> 3]++;
-        libraw_internal_data.output_data.histogram[1][img[1] >> 3]++;
-        libraw_internal_data.output_data.histogram[2][img[2] >> 3]++;
+        ushort *p = imgdata.image[0] + (size_t)r * Wd * 4;
+        for (int cc = 0; cc < Wd; cc++, p += 4)
+        {
+          float o0 = out_cam[0][0] * p[0] + out_cam[0][1] * p[1] + out_cam[0][2] * p[2];
+          float o1 = out_cam[1][0] * p[0] + out_cam[1][1] * p[1] + out_cam[1][2] * p[2];
+          float o2 = out_cam[2][0] * p[0] + out_cam[2][1] * p[1] + out_cam[2][2] * p[2];
+          p[0] = CLIP((int)o0);
+          p[1] = CLIP((int)o1);
+          p[2] = CLIP((int)o2);
+          local[p[0] >> 3]++;
+          local[LIBRAW_HISTOGRAM_SIZE + (p[1] >> 3)]++;
+          local[2 * LIBRAW_HISTOGRAM_SIZE + (p[2] >> 3)]++;
+        }
+      }
+#if defined(LIBRAW_USE_OPENMP)
+#pragma omp critical
+#endif
+      for (int k = 0; k < LIBRAW_HISTOGRAM_SIZE; k++)
+      {
+        hist[0][k] += local[k];
+        hist[1][k] += local[LIBRAW_HISTOGRAM_SIZE + k];
+        hist[2][k] += local[2 * LIBRAW_HISTOGRAM_SIZE + k];
       }
     }
   }

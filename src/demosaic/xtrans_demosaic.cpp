@@ -1,5 +1,6 @@
 /* -*- C++ -*-
  * Copyright 2019-2025 LibRaw LLC (info@libraw.org)
+ * Modified by Emulsion Cam, 2026: X-Trans demosaic made cancellable, tiled deterministically and faster (EMULSION_PATCHES.md, item 1).
  *
  LibRaw uses code from dcraw.c -- Dave Coffin's raw photo decoder,
  dcraw.c is copyright 1997-2018 by Dave Coffin, dcoffin a cybercom o net.
@@ -17,6 +18,7 @@
  */
 
 #include "../../internal/dcraw_defs.h"
+#include <vector>
 
 #define fcol(row, col) xtrans[(row + 6) % 6][(col + 6) % 6]
 /*
@@ -174,11 +176,33 @@ void LibRaw::xtrans_interpolate(int passes)
   size_t buffer_size = LIBRAW_AHD_TILE * LIBRAW_AHD_TILE * (ndir * 11 + 6);
   char** buffers = malloc_omp_buffers(buffer_count, buffer_size);
 
-#if defined(LIBRAW_USE_OPENMP)
-# pragma omp parallel for schedule(dynamic) default(none) firstprivate(buffers, allhex, passes, sgrow, sgcol, ndir) shared(dir) 
-#endif
-    for (int top = 3; top < height - 19; top += LIBRAW_AHD_TILE - 16)
+    // emulsion-cam patch (EMULSION_PATCHES.md): 2D tiles in a 4-phase checkerboard instead of
+    // row strips. Tiles that share an edge never run at the same time, so the output no longer
+    // depends on thread count or timing (strips raced on their 16 px overlap), the cores stay
+    // busy (117 tiles instead of 9 strips on a 26 MP frame), and a cancel lands per tile.
+    // Modes kept for comparison: 0 = original strips, 1 = 2D tiles, unordered.
+    const int xt_mode = 2;
+    std::vector<int> xt_tops, xt_lefts;
+    for (int top = 3; top < height - 19; top += LIBRAW_AHD_TILE - 16) xt_tops.push_back(top);
+    for (int left = 3; left < width - 19; left += LIBRAW_AHD_TILE - 16) xt_lefts.push_back(left);
+    const int xt_nt = (int)xt_tops.size();
+    const int xt_nl = xt_mode == 0 ? 1 : (int)xt_lefts.size();
+    const int xt_phases = xt_mode == 2 ? 4 : 1;
+    const int *xt_tp = xt_tops.data(), *xt_lp = xt_lefts.data();
+    for (int xt_phase = 0; xt_phase < xt_phases; xt_phase++)
     {
+#if defined(LIBRAW_USE_OPENMP)
+# pragma omp parallel for schedule(dynamic) default(none) firstprivate(buffers, allhex, passes, sgrow, sgcol, ndir, xt_phase, xt_phases, xt_nt, xt_nl, xt_tp, xt_lp, xt_mode) shared(dir)
+#endif
+    for (int xt_t = 0; xt_t < xt_nt * xt_nl; xt_t++)
+    {
+        // emulsion-cam patch: a cancel (setCancelFlag) skips the remaining tiles; the
+        // checkCancel() after the loop then aborts.
+        if (__atomic_load_n(&_exitflag, __ATOMIC_RELAXED))
+            continue;
+        const int xt_ti = xt_t / xt_nl, xt_tj = xt_t % xt_nl;
+        if (xt_phases == 4 && ((xt_ti & 1) * 2 + (xt_tj & 1)) != xt_phase) continue;
+        const int top = xt_tp[xt_ti];
 #if defined(LIBRAW_USE_OPENMP)
         char* buffer = buffers[omp_get_thread_num()];
 #else
@@ -198,8 +222,10 @@ void LibRaw::xtrans_interpolate(int passes)
         homo = (char(*)[LIBRAW_AHD_TILE][LIBRAW_AHD_TILE])(
             buffer + LIBRAW_AHD_TILE * LIBRAW_AHD_TILE * (ndir * 10 + 6));
 
-        for (int left = 3; left < width - 19; left += LIBRAW_AHD_TILE - 16)
+        for (int xt_li = (xt_mode == 0 ? 0 : xt_tj); xt_li < (xt_mode == 0 ? (int)(width > 22 ? 1 << 30 : 0) : xt_tj + 1); xt_li++)
         {
+            const int left = xt_mode == 0 ? 3 + xt_li * (LIBRAW_AHD_TILE - 16) : xt_lp[xt_li];
+            if (left >= width - 19) break;
             int mrow = MIN(top + LIBRAW_AHD_TILE, height - 3);
             int mcol = MIN(left + LIBRAW_AHD_TILE, width - 3);
             for (int row = top; row < mrow; row++)
@@ -370,66 +396,98 @@ void LibRaw::xtrans_interpolate(int passes)
 
             /* Build homogeneity maps from the derivatives:			*/
             memset(homo, 0, ndir * LIBRAW_AHD_TILE * LIBRAW_AHD_TILE);
-            for (int row = 4; row < mrow - 4; row++)
-                for (int col = 4; col < mcol - 4; col++)
+            {
+                float trrow[LIBRAW_AHD_TILE];
+                for (int row = 4; row < mrow - 4; row++)
                 {
-                    int d;
-                    float tr;
-                    for (tr = FLT_MAX, d = 0; d < ndir; d++)
-                        if (tr > drv[d][row][col])
-                            tr = drv[d][row][col];
-                    tr *= 8;
+                    for (int col = 4; col < mcol - 4; col++)
+                    {
+                        float tr = drv[0][row][col];
+                        for (int d = 1; d < ndir; d++)
+                            tr = drv[d][row][col] < tr ? drv[d][row][col] : tr;
+                        trrow[col] = tr * 8;
+                    }
                     for (int dd = 0; dd < ndir; dd++)
-                        for (int v = -1; v <= 1; v++)
-                            for (int h = -1; h <= 1; h++)
-                                if (drv[dd][row + v][col + h] <= tr)
-                                    homo[dd][row][col]++;
+                    {
+                        const float *__restrict r0 = drv[dd][row - 1];
+                        const float *__restrict r1 = drv[dd][row];
+                        const float *__restrict r2 = drv[dd][row + 1];
+                        unsigned char *__restrict out = (unsigned char *)homo[dd][row];
+                        for (int col = 4; col < mcol - 4; col++)
+                        {
+                            const float tr = trrow[col];
+                            out[col] = (unsigned char)(
+                                (r0[col - 1] <= tr) + (r0[col] <= tr) + (r0[col + 1] <= tr) +
+                                (r1[col - 1] <= tr) + (r1[col] <= tr) + (r1[col + 1] <= tr) +
+                                (r2[col - 1] <= tr) + (r2[col] <= tr) + (r2[col + 1] <= tr));
+                        }
+                    }
                 }
+            }
 
             /* Average the most homogeneous pixels for the final result:	*/
             if (height - top < LIBRAW_AHD_TILE + 4)
                 mrow = height - top + 2;
             if (width - left < LIBRAW_AHD_TILE + 4)
                 mcol = width - left + 2;
-            for (int row = MIN(top, 8); row < mrow - 8; row++)
-                for (int col = MIN(left, 8); col < mcol - 8; col++)
+            {
+                const int r0 = MIN(top, 8), c0 = MIN(left, 8);
+                // vertical 5-sums of homo for each direction, then horizontal 5-sums: hm == the 5x5 box
+                unsigned char vs[8][LIBRAW_AHD_TILE];
+                unsigned char hs[8][LIBRAW_AHD_TILE];
+                for (int row = r0; row < mrow - 8; row++)
                 {
-                    int v;
-                    int hm[8];
+                    const int cl = c0 - 2, cr = mcol - 8 + 2;
                     for (int d = 0; d < ndir; d++)
-                        for (v = -2, hm[d] = 0; v <= 2; v++)
-                            for (int h = -2; h <= 2; h++)
-                                hm[d] += homo[d][row + v][col + h];
-                    for (int d = 0; d < ndir - 4; d++)
-                        if (hm[d] < hm[d + 4])
-                            hm[d] = 0;
-                        else if (hm[d] > hm[d + 4])
-                            hm[d + 4] = 0;
-                    ushort max;
-                    int d;
-                    for (d = 1, max = hm[0]; d < ndir; d++)
-                        if (max < hm[d])
-                            max = hm[d];
-                    max -= max >> 3;
-
-                    int avg[4];
-                    memset(avg, 0, sizeof avg);
-                    for (int dd = 0; dd < ndir; dd++)
-                        if (hm[dd] >= max)
+                    {
+                        const unsigned char *__restrict a0 = (const unsigned char *)homo[d][row - 2];
+                        const unsigned char *__restrict a1 = (const unsigned char *)homo[d][row - 1];
+                        const unsigned char *__restrict a2 = (const unsigned char *)homo[d][row];
+                        const unsigned char *__restrict a3 = (const unsigned char *)homo[d][row + 1];
+                        const unsigned char *__restrict a4 = (const unsigned char *)homo[d][row + 2];
+                        unsigned char *__restrict v = vs[d];
+                        for (int col = cl; col < cr; col++)
+                            v[col] = (unsigned char)(a0[col] + a1[col] + a2[col] + a3[col] + a4[col]);
+                        unsigned char *__restrict hrow = hs[d];
+                        for (int col = c0; col < mcol - 8; col++)
+                            hrow[col] = (unsigned char)(v[col - 2] + v[col - 1] + v[col] + v[col + 1] + v[col + 2]);
+                    }
+                    for (int col = c0; col < mcol - 8; col++)
+                    {
+                        // Same decisions as dcraw's loop, without data-dependent branches.
+                        int hm[8];
+                        for (int d = 0; d < ndir; d++) hm[d] = hs[d][col];
+                        for (int d = 0; d < ndir - 4; d++)
                         {
-                            FORC3 avg[c] += rgb[dd][row][col][c];
-                            avg[3]++;
+                            const int a = hm[d], b = hm[d + 4];
+                            hm[d] = a < b ? 0 : a;
+                            hm[d + 4] = a > b ? 0 : b;
                         }
-                    FORC3 image[(row + top) * width + col + left][c] = avg[c] / avg[3];
+                        int mx = hm[0];
+                        for (int d = 1; d < ndir; d++) mx = hm[d] > mx ? hm[d] : mx;
+                        mx -= mx >> 3;
+                        int a0 = 0, a1 = 0, a2 = 0, n = 0;
+                        for (int dd = 0; dd < ndir; dd++)
+                        {
+                            const int m = -(hm[dd] >= mx);
+                            const ushort *px = rgb[dd][row][col];
+                            a0 += px[0] & m; a1 += px[1] & m; a2 += px[2] & m; n -= m;
+                        }
+                        ushort *dst = image[(row + top) * width + col + left];
+                        dst[0] = ushort(a0 / n); dst[1] = ushort(a1 / n); dst[2] = ushort(a2 / n);
+                    }
                 }
+            }
         }
     }
   
+    } // phases
 #ifdef LIBRAW_USE_OPENMP
 #pragma omp barrier
 #endif
 
     free_omp_buffers(buffers, buffer_count);
+    checkCancel(); // emulsion-cam patch: see the tile loop
 
     border_interpolate(8);
 }

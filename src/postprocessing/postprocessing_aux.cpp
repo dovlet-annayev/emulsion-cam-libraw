@@ -1,5 +1,6 @@
 /* -*- C++ -*-
  * Copyright 2019-2025 LibRaw LLC (info@libraw.org)
+ * Modified by Emulsion Cam, 2026: blend_highlights runs its rows in parallel (EMULSION_PATCHES.md, item 3).
  *
  LibRaw uses code from dcraw.c -- Dave Coffin's raw photo decoder,
  dcraw.c is copyright 1997-2018 by Dave Coffin, dcoffin a cybercom o net.
@@ -290,6 +291,9 @@ void LibRaw::blend_highlights()
     return;
   RUN_CALLBACK(LIBRAW_PROGRESS_HIGHLIGHTS, 0, 2);
   FORCC if (clip > (i = int(65535.f * pre_mul[c]))) clip = i;
+#if defined(LIBRAW_USE_OPENMP)
+#pragma omp parallel for schedule(static) private(col, c, i, j, cam, lab, sum, chratio)
+#endif
   for (row = 0; row < height; row++)
     for (col = 0; col < width; col++)
     {

@@ -1,5 +1,6 @@
 /* -*- C++ -*-
  * Copyright 2019-2025 LibRaw LLC (info@libraw.org)
+ * Modified by Emulsion Cam, 2026: copy_bayer's half-size race fixed (EMULSION_PATCHES.md, item 4).
  *
 
  LibRaw is free software; you can redistribute it and/or modify
@@ -274,28 +275,36 @@ void LibRaw::copy_bayer(unsigned short cblack[4], unsigned short *dmaxp)
 {
   // Both cropped and uncropped
   int maxHeight = MIN(int(S.height),int(S.raw_height)-int(S.top_margin));
+  // Emulsion: with half_size (IO.shrink) input rows 2k and 2k+1 write the same output pixels, and
+  // a loop over input rows let two threads race on them. Loop over OUTPUT rows instead, each
+  // copying its input rows in order: the single-threaded result. Without shrink, step is 1.
+  int step = 1 << IO.shrink;
+  int groups = (maxHeight + step - 1) / step;
 #if defined(LIBRAW_USE_OPENMP)
-#pragma omp parallel for schedule(dynamic) default(none) shared(dmaxp) firstprivate(cblack, maxHeight)
+#pragma omp parallel for schedule(dynamic) default(none) shared(dmaxp) firstprivate(cblack, maxHeight, step, groups)
 #endif
-  for (int row = 0; row < maxHeight ; row++)
+  for (int group = 0; group < groups; group++)
   {
-    int col;
     unsigned short ldmax = 0;
-    for (col = 0; col < S.width && col + S.left_margin < S.raw_width; col++)
+    for (int row = group * step; row < maxHeight && row < (group + 1) * step; row++)
     {
-      unsigned short val =
-          imgdata.rawdata.raw_image[(row + S.top_margin) * S.raw_pitch / 2 +
-                                    (col + S.left_margin)];
-      int cc = fcol(row, col);
-      if (val > cblack[cc])
+      int col;
+      for (col = 0; col < S.width && col + S.left_margin < S.raw_width; col++)
       {
-        val -= cblack[cc];
-        if (val > ldmax)
-          ldmax = val;
+        unsigned short val =
+            imgdata.rawdata.raw_image[(row + S.top_margin) * S.raw_pitch / 2 +
+                                      (col + S.left_margin)];
+        int cc = fcol(row, col);
+        if (val > cblack[cc])
+        {
+          val -= cblack[cc];
+          if (val > ldmax)
+            ldmax = val;
+        }
+        else
+          val = 0;
+        imgdata.image[((row) >> IO.shrink) * S.iwidth + ((col) >> IO.shrink)][cc] = val;
       }
-      else
-        val = 0;
-      imgdata.image[((row) >> IO.shrink) * S.iwidth + ((col) >> IO.shrink)][cc] = val;
     }
 #if defined(LIBRAW_USE_OPENMP)
 #pragma omp critical(dataupdate)

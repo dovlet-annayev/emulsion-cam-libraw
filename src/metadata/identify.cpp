@@ -1,5 +1,6 @@
 /* -*- C++ -*-
  * Copyright 2019-2025 LibRaw LLC (info@libraw.org)
+ * Modified by Emulsion Cam, 2026: the Hasselblad X2D crop also applies to the X2D II 100C (EMULSION_PATCHES.md, item 5).
  *
  LibRaw uses code from dcraw.c -- Dave Coffin's raw photo decoder,
  dcraw.c is copyright 1997-2018 by Dave Coffin, dcoffin a cybercom o net.
@@ -2800,8 +2801,9 @@ void LibRaw::identify_finetune_dcr(char head[64], INT64 fsize, INT64 flen)
 			top_margin = 108;
 			height = raw_height - top_margin;
 		}
-        else if ((imHassy.SensorCode == 20) && imHassy.uncropped)
-        { // Hasselblad X2D-100c, CFV-100c
+        else if (((imHassy.SensorCode == 20) || ((raw_width == 11904) && (raw_height == 8842))) &&
+                 imHassy.uncropped)
+        { // Hasselblad X2D-100c, CFV-100c; X2D II 100C (sensor code 22, the same frame)
 			left_margin = 124;
 			width = 11664;
 			top_margin = 92;
