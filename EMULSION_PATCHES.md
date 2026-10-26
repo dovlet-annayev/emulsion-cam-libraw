@@ -54,6 +54,18 @@ changes this list.
    untrusted input). 0 already means "no angles" to the code after the switch, so a well-formed
    file reads exactly as before. Drop this patch once a LibRaw release fixes the CVE.
 
+7. `src/demosaic/misc_demosaic.cpp` — `pre_interpolate`, half-size X-Trans: the cell whose 2x2
+   block holds only green sites (its red and blue are filled from its neighbours) is found from
+   the pattern (`fcol`), not as the first cell whose red and blue are both 0. After black
+   subtraction a real red and blue are 0 wherever the photo is at black, so a dark top-left corner
+   moved the fill onto real pixels and left every true all-green cell — a ninth of the frame —
+   with no red or blue: a green cast on the half-size develop only. The editor shows that develop
+   and Auto solves on it, while saves use the full develop, so the save came out magenta against
+   the screen. Found on an X100VI night frame: full/half was R 1.09, G 0.93, B 1.10; now 0.99,
+   0.98, 0.98 (the 2% left is the very dark frame's noise, sampled vs demosaiced). Where the corner
+   is not at black the same cell is found, so the output is unchanged: DSCF7122 and DSCF2851 give
+   byte-identical half-size develops.
+
 ## Where the source is published, and upgrading LibRaw
 
 CDDL asks us to tell users where this modified LibRaw can be downloaded; the app's open-source

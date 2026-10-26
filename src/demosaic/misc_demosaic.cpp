@@ -1,5 +1,6 @@
 /* -*- C++ -*-
  * Copyright 2019-2025 LibRaw LLC (info@libraw.org)
+ * Modified by Emulsion Cam, 2026: half-size X-Trans finds its all-green cells from the pattern (EMULSION_PATCHES.md, item 7).
  *
  LibRaw uses code from dcraw.c -- Dave Coffin's raw photo decoder,
  dcraw.c is copyright 1997-2018 by Dave Coffin, dcoffin a cybercom o net.
@@ -31,10 +32,20 @@ void LibRaw::pre_interpolate()
       width = iwidth;
       if (filters == 9)
       {
+        // Emulsion: the cell whose 2x2 block holds only green sites, read from the pattern. It was
+        // the first cell with red and blue both 0 — but a real red and blue are 0 wherever the
+        // photo is at black, so a dark corner moved the fill onto real pixels and left a ninth of
+        // the frame with no red or blue (a green cast). One cell in this window always qualifies.
         for (row = 0; row < 3; row++)
           for (col = 1; col < 4; col++)
-            if (!(image[row * width + col][0] | image[row * width + col][2]))
+          {
+            int rb = 0;
+            for (int y = row * 2; y < row * 2 + 2; y++)
+              for (int x = col * 2; x < col * 2 + 2; x++)
+                rb |= fcol(y, x) != 1;
+            if (!rb)
               goto break2;
+          }
       break2:
         for (; row < height; row += 3)
           for (col = (col - 1) % 3 + 1; col < width - 1; col += 3)
