@@ -1,5 +1,6 @@
 /* -*- C++ -*-
  * Copyright 2019-2025 LibRaw LLC (info@libraw.org)
+ * Modified by Emulsion Cam, 2026: ShotInfo offsets read only inside the block (EMULSION_PATCHES.md, item 6).
  *
  LibRaw is free software; you can redistribute it and/or modify
  it under the terms of the one of two licenses as you choose:
@@ -893,6 +894,13 @@ free(cj_block);
 free(ck_block);
 */
 
+        // The offsets below are fixed per ShotInfo version, but the block's length comes from the
+        // file: a crafted NEF with a short block read past its end (CVE-2026-111272). Out of
+        // range reads as 0, which skips the angles below.
+        auto shotInfo4 = [&](unsigned off) -> unsigned {
+          return off + 4 <= ShotInfo_len ? sget4_order(morder, ShotInfo_buf + off) : 0u;
+        };
+
         switch (imNikon.ShotInfoVersion) {
         case 208: // ShotInfoD80, Rotation
           RotationOffset = 590;
@@ -910,27 +918,27 @@ free(ck_block);
           break;
 
         case 233: // ShotInfoD810, Roll/Pitch/Yaw
-          OrientationOffset = sget4_order(morder, ShotInfo_buf+0x84);
+          OrientationOffset = shotInfo4(0x84);
           break;
 
         case 238: // D5,   ShotInfoD500, Rotation, Roll/Pitch/Yaw
         case 239: // D500, ShotInfoD500, Rotation, Roll/Pitch/Yaw
-          RotationOffset = sget4_order(morder, ShotInfo_buf+0x10) + 0xca;
+          RotationOffset = shotInfo4(0x10) + 0xca;
           if (RotationOffset > 0xca) {
             RotationOffset -= 0xb0;
           }
           if (RotationOffset<ShotInfo_len) {
             imNikon.MakernotesFlip = *(ShotInfo_buf+RotationOffset) & 0x03;
           }
-          OrientationOffset = sget4_order(morder, ShotInfo_buf+0xa0);
+          OrientationOffset = shotInfo4(0xa0);
           break;
 
         case 243: // ShotInfoD850, Roll/Pitch/Yaw
-          OrientationOffset = sget4_order(morder, ShotInfo_buf+0xa0);
+          OrientationOffset = shotInfo4(0xa0);
           break;
 
         case 246: // ShotInfoD6, Roll/Pitch/Yaw
-          OrientationOffset = sget4_order(morder, ShotInfo_buf+0x9c);
+          OrientationOffset = shotInfo4(0x9c);
           break;
 
         case 800: // "Z 6", "Z 7",     ShotInfoZ7II, Roll/Pitch/Yaw
@@ -938,11 +946,11 @@ free(ck_block);
         case 802: // "Z 5",            ShotInfoZ7II, Roll/Pitch/Yaw
         case 803: // "Z 6_2", "Z 7_2", ShotInfoZ7II, Roll/Pitch/Yaw
         case 804: // "Z fc"            ShotInfoZ7II, Roll/Pitch/Yaw
-          OrientationOffset = sget4_order(morder, ShotInfo_buf+0x98);
+          OrientationOffset = shotInfo4(0x98);
           break;
 
         case 805: // "Z 9",            ShotInfoZ9, Roll/Pitch/Yaw
-          OrientationOffset = sget4_order(morder, ShotInfo_buf+0x84);
+          OrientationOffset = shotInfo4(0x84);
           break;
         case 806: // "Z 8"
         	if (ShotInfo_len >= 12) {

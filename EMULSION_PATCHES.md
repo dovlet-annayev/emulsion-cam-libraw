@@ -46,6 +46,14 @@ changes this list.
    Its colour already came from the same frame size (`100-20-Coated6`, the X2D's matrix).
    Verified on an X2D II 3FR: 11904 x 8842 -> 11664 x 8750, Adobe's crop for this frame.
 
+6. `src/metadata/nikon.cpp` — the Nikon ShotInfo block (tag 0x0091): every fixed-offset 4-byte
+   read (`OrientationOffset`/`RotationOffset` for versions 233, 238/239, 243, 246, 800-805) goes
+   through `shotInfo4`, which returns 0 unless the read lies inside the block. The block's length
+   comes from the file, and a crafted NEF with a short block made these reads run past its end
+   (CVE-2026-111272, open "through 0.22.2" when this was written; every RAW a user imports is
+   untrusted input). 0 already means "no angles" to the code after the switch, so a well-formed
+   file reads exactly as before. Drop this patch once a LibRaw release fixes the CVE.
+
 ## Where the source is published, and upgrading LibRaw
 
 CDDL asks us to tell users where this modified LibRaw can be downloaded; the app's open-source
